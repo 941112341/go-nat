@@ -3,9 +3,12 @@ package tcp
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
+	"proxy/utils"
+	"sync"
 	"time"
 	"unsafe"
 )
@@ -21,11 +24,23 @@ type ServerClient struct {
 type Connection struct {
 	net.Conn
 	RegisterRequest
+	Closed bool // 避免重复关闭
+	CloseLock sync.Mutex
 	ReadChannel chan interface{}
 }
 
 func (client *ServerClient) Close() {
-	for err := client.Connection.Close(); err != nil; err = client.Connection.Close() {
+	p(errors.New("client close"), client)
+	if client.Closed {
+		return
+	}
+	client.CloseLock.Lock()
+	defer client.CloseLock.Unlock()
+	if client.Closed {
+		return
+	}
+	client.Closed = true
+	if err := client.Connection.Close(); err != nil {
 		log.Println(err)
 	}
 	close(client.HttpTransferChannel)
@@ -65,8 +80,8 @@ func (client *Connection) writeMsg(mtype MessageType, protocal interface{}) erro
 }
 
 func (client *Connection) WriteMessage(message *Message) error {
-	content := message.Content
-	bytes := *(*[]byte)(unsafe.Pointer(&content))
+	msg := message.ToString()
+	bytes := utils.String2Splice(msg)
 	n, err := client.Write(bytes)
 	if err != nil { // 超时
 		log.Println(fmt.Errorf("tcp:write timeout %v", err))
@@ -88,12 +103,9 @@ func (client *Connection) ReadACK() (*Ack, error) {
 	if err != nil {
 		return nil, err
 	}
-	var imsg interface{} = msg
-	ack, ok := imsg.(*Ack)
-	if !ok {
-		return nil, fmt.Errorf("cannot cast message to ack")
-	}
-	return ack, nil
+	var ack Ack
+	err = json.Unmarshal(utils.String2Splice(msg.Content), &ack)
+	return &ack, err
 }
 
 func (client *Connection) ReadRegister() (*RegisterRequest, error) {
@@ -101,12 +113,9 @@ func (client *Connection) ReadRegister() (*RegisterRequest, error) {
 	if err != nil {
 		return nil, err
 	}
-	var imsg interface{} = msg
-	ack, ok := imsg.(*RegisterRequest)
-	if !ok {
-		return nil, fmt.Errorf("cannot cast message to register request")
-	}
-	return ack, nil
+	var ack RegisterRequest
+	err = json.Unmarshal(utils.String2Splice(msg.Content), &ack)
+	return &ack, err
 }
 
 func (client *Connection) ReadTransferRequest() (*HttpTransferRequest, error) {
@@ -114,12 +123,9 @@ func (client *Connection) ReadTransferRequest() (*HttpTransferRequest, error) {
 	if err != nil {
 		return nil, err
 	}
-	var imsg interface{} = msg
-	ack, ok := imsg.(*HttpTransferRequest)
-	if !ok {
-		return nil, fmt.Errorf("cannot cast message to transfer request")
-	}
-	return ack, nil
+	var ack HttpTransferRequest
+	err = json.Unmarshal(utils.String2Splice(msg.Content), &ack)
+	return &ack, err
 }
 
 func (client *Connection) ReadTransferResponse() (*HttpTransferResponse, error) {
@@ -127,12 +133,9 @@ func (client *Connection) ReadTransferResponse() (*HttpTransferResponse, error) 
 	if err != nil {
 		return nil, err
 	}
-	var imsg interface{} = msg
-	ack, ok := imsg.(*HttpTransferResponse)
-	if !ok {
-		return nil, fmt.Errorf("cannot cast message to transfer response")
-	}
-	return ack, nil
+	var ack HttpTransferResponse
+	err = json.Unmarshal(utils.String2Splice(msg.Content), &ack)
+	return &ack, err
 }
 
 
@@ -141,21 +144,18 @@ func (client *Connection) ReadHeartBeat() (*HeartBeat, error) {
 	if err != nil {
 		return nil, err
 	}
-	var imsg interface{} = msg
-	ack, ok := imsg.(*HeartBeat)
-	if !ok {
-		return nil, fmt.Errorf("cannot cast message to transfer response")
-	}
-	return ack, nil
+	var ack HeartBeat
+	err = json.Unmarshal(utils.String2Splice(msg.Content), &ack)
+	return &ack, err
 }
 
 
 func (client *Connection) ReadMessage() (msg *Message, err error) {
 	// 超时控制
-	err = client.SetReadDeadline(time.Now().Add(5 * time.Second))
-	if err != nil {
-		return
-	}
+	//err = client.SetReadDeadline(time.Now().Add(timeout))
+	//if err != nil {
+	//	return
+	//}
 	r := bufio.NewReader(client)
 	msgType, err := r.ReadString('\n')
 	if err != nil {

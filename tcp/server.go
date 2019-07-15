@@ -6,7 +6,7 @@ import (
 	"log"
 	"net"
 	"proxy/config"
-	"proxy/http"
+	"proxy/utils"
 	"time"
 )
 
@@ -31,6 +31,7 @@ func Start() {
 }
 
 func handler(conn net.Conn) {
+	log.Println("handler tcp connection")
 	channel := make(chan HttpTransferResponse)
 	msgChannel := make(chan interface{}, 100)
 	client := &ServerClient{
@@ -44,16 +45,16 @@ func handler(conn net.Conn) {
 		return
 	}
 	client.RegisterRequest = *request
-	ok := http.AddRegister(client)
+	ok := AddRegister(client)
 	if !ok {
 		err = client.WriteFail("路径已经注册")
+		RemoveRegister(client)
+		client.Close()
 	} else {
 		err = client.WriteSuccess()
 	}
 	if err != nil {
-		p(err, client)
-		client.Close()
-		return
+		log.Println(err)
 	}
 	// 持续读
 	go ServerReading(client)
@@ -63,13 +64,15 @@ func handler(conn net.Conn) {
 func ListenMessage(client *ServerClient) {
 	for msg := range client.ReadChannel {
 		switch msg.(type) {
-		case HeartBeat:
+		case *HeartBeat:
 			client.LastHeartBeat = time.Now()
-		case HttpTransferResponse:
+			p(errors.New("heart beat"), client)
+		case *HttpTransferResponse:
 			select {
-			case client.HttpTransferChannel <- msg.(HttpTransferResponse):
+			case client.HttpTransferChannel <- *msg.(*HttpTransferResponse):
+				p(errors.New("http response"), client)
 			case <-time.NewTicker(time.Second).C:
-				p(fmt.Errorf("入队失败 %#v", msg), client)
+				p(fmt.Errorf("转发超时 %#v", msg), client)
 			}
 		default:
 			p(errors.New("error msg type"), client)
@@ -96,9 +99,13 @@ func ServerReading(client *ServerClient) {
 	for {
 		msg, err := client.ReadMessage()
 		if err != nil {
-			return
+			err = utils.NetErrHandler(err)
+			if err != nil {
+				return
+			}
+			continue
 		}
-		client.ReadChannel <- msg
+		client.ReadChannel <- msg.ProtoType()
 	}
 }
 

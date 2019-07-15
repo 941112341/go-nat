@@ -4,6 +4,8 @@ import (
 	"errors"
 	"log"
 	"net"
+	"proxy/config"
+	"proxy/utils"
 	"time"
 )
 
@@ -11,18 +13,24 @@ import (
 type Client struct {
 	Callback func(request *HttpTransferRequest) HttpTransferResponse
 	Connection
-	Closed bool // 避免重复关闭
-	ResponseChannel chan HttpTransferResponse
+	AckChannel chan Ack // 通知注册情况
 }
 
 func (client *Client) Close() {
+	log.Println("close")
 	if client.Closed {
 		return
 	}
-	for err := client.Connection.Close(); err != nil; err = client.Connection.Close() {
-		log.Println(err)
+	client.CloseLock.Lock()
+	defer client.CloseLock.Unlock()
+	if client.Closed {
+		return
 	}
 	client.Closed = true
+	err := client.Connection.Close()
+	if err != nil {
+		log.Println(err)
+	}
 	close(client.ReadChannel)
 }
 
@@ -30,15 +38,20 @@ func (client *Client) Close() {
 
 func Connect(ip, port, url string, callback func(request *HttpTransferRequest) HttpTransferResponse) (*Client, error) {
 	conn, err := net.Dial("tcp", ip + ":" + port)
-	readChannel, respChannel := make(chan interface{}, 100), make(chan HttpTransferResponse)
+	if err != nil {
+		return nil, err
+	}
+	readChannel, ackChannel := make(chan interface{}, 100), make(chan Ack)
+	host, err := utils.GetHost()
 	if err != nil {
 		return nil, err
 	}
 	client := &Client{
 		Connection: Connection{Conn: conn, ReadChannel: readChannel, RegisterRequest: RegisterRequest{
 			RegisterURL: url,
+			Host:host,
 		}},
-		ResponseChannel:respChannel,
+		AckChannel: ackChannel,
 		Callback:callback,
 	}
 	err = client.WriteRegister()
@@ -49,17 +62,19 @@ func Connect(ip, port, url string, callback func(request *HttpTransferRequest) H
 	go ClientReading(client)
 	go ReadingListener(client)
 	select {
-	case <-respChannel:
+	case <-ackChannel:
 	case <-time.NewTicker(3 * time.Second).C:
 		client.Close()
 		return nil, errors.New("register time out")
 	}
+	log.Println("build success")
 	return client, nil
 }
 
 func SendHeartBeat(client *Client) {
 	defer client.Close()
-	for range time.NewTicker(5 * time.Second).C {
+	for range time.NewTicker(time.Duration(config.HeartBeatRate) * time.Second).C {
+		log.Println("send heart beat")
 		err := client.WriteHeartBeat()
 		if err != nil {
 			log.Println(err)
@@ -70,31 +85,38 @@ func SendHeartBeat(client *Client) {
 
 func ClientReading(client *Client) {
 	defer client.Close()
-	for  {
+	for {
 		msg, err := client.ReadMessage()
 		if err != nil {
-			return
+			err = utils.NetErrHandler(err)
+			if err != nil {
+				return
+			}
+			continue
 		}
-		client.ReadChannel <- msg
+		client.ReadChannel <- msg.ProtoType()
 	}
 }
 
 func ReadingListener(client *Client) {
 	for key := range client.ReadChannel {
 		switch key.(type) {
-		case Ack:
+		case *Ack:
 			ack := key.(*Ack)
 			if !ack.Ok {
 				log.Println(ack.Msg)
 				client.Close()
+			} else {
+				client.AckChannel <- *ack
 			}
-		case HttpTransferRequest:
+			log.Println("get register ack")
+		case *HttpTransferRequest:
 			request := key.(*HttpTransferRequest)
 			resp := client.Callback(request)
-			select {
-			case client.ReadChannel <- resp:
-			case <-time.NewTicker(2 * time.Second).C:
-				log.Println("time out")
+			err := client.WriteTransferResponse(&resp)
+			err = utils.NetErrHandler(err)
+			if err != nil {
+				log.Println(err)
 			}
 		default:
 			log.Println("err type", key)

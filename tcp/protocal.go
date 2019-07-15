@@ -1,14 +1,16 @@
 package tcp
 
 import (
+	"encoding/json"
 	"log"
+	"proxy/utils"
 	"reflect"
 	"strconv"
 	"strings"
 )
 
 
-var typeMap map[MessageType]reflect.Type
+var typeMap = map[MessageType]reflect.Type{}
 
 func init() {
 	typeMap[ACK] = reflect.TypeOf(Ack{})
@@ -28,7 +30,7 @@ type HttpTransferRequest struct {
 }
 
 type HttpTransferResponse struct {
-	Headers map[string][]string
+	Headers map[string]string
 	Body string
 }
 
@@ -66,6 +68,15 @@ type Message struct {
 
 func (msg *Message) ToString() string {
 	return strconv.FormatInt(int64(msg.MType), 10) + Split + msg.Content + Split
+}
+
+func (msg *Message) ProtoType() interface{} {
+	i := reflect.New(typeMap[msg.MType]).Interface()
+	err := json.Unmarshal(utils.String2Splice(msg.Content), i)
+	if err != nil {
+		log.Println(err)
+	}
+	return i
 }
 
 func NewMessage(msg string) *Message {
